@@ -1,0 +1,11 @@
+pystray>=0.19.5
+Pillow>=10.0.0
+hidapi>=0.14.0
+winrt-runtime>=2.1.0
+winrt-Windows.Foundation>=2.1.0
+winrt-Windows.Foundation.Collections>=2.1.0
+winrt-Windows.Devices.Enumeration>=2.1.0
+winrt-Windows.Devices.Bluetooth>=2.1.0
+winrt-Windows.Devices.Bluetooth.GenericAttributeProfile>=2.1.0
+winrt-Windows.Storage.Streams>=2.1.0
+pyinstaller>=6.0.0

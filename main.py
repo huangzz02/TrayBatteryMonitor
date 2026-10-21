@@ -214,6 +214,24 @@ def is_device_connected(d: Optional[DeviceBattery]) -> bool:
             return False
     return status == "connected"
 
+# hidapi (C library) is not thread-safe on Windows.
+# Multiple concurrent calls to hid_enumerate / hid_open from different worker threads
+# can corrupt the CRT heap (STATUS_HEAP_CORRUPTION 0xC0000374).
+# We run all HID collectors sequentially in a single worker thread under a dedicated lock.
+HID_LOCK = threading.Lock()
+
+def _collect_hid_devices_safe(collectors: list) -> list:
+    with HID_LOCK:
+        devices = []
+        for c in collectors:
+            try:
+                res = c.collect()
+                if res and isinstance(res, list):
+                    devices.extend(res)
+            except Exception as e:
+                logging.debug(f"Collector {c.__class__.__name__} error: {e}")
+        return devices
+
 class BatteryMonitorApp:
     def __init__(self):
         self.config = load_config()
@@ -576,7 +594,6 @@ class BatteryMonitorApp:
         hid_collectors = [
             self.razer_collector,
             self.atk_collector,
-            self.xinput_collector,
             self.logitech_collector,
             self.sony_collector,
             self.hyperx_collector,
@@ -584,15 +601,20 @@ class BatteryMonitorApp:
             self.corsair_collector,
             self.asus_collector,
         ]
-        results = await asyncio.gather(
-            *(loop.run_in_executor(None, c.collect) for c in hid_collectors),
-            return_exceptions=True
-        )
 
-        for res in results:
-            if isinstance(res, list):
-                for d in res:
-                    new_devices[d.id] = d
+        # XInput uses DirectX COM API (not hidapi) and is safe to run alongside
+        xinput_task = loop.run_in_executor(None, self.xinput_collector.collect)
+        # All HID collectors run sequentially in a single worker thread to guarantee 100% C-heap safety
+        hid_task = loop.run_in_executor(None, _collect_hid_devices_safe, hid_collectors)
+
+        xinput_res, hid_res = await asyncio.gather(xinput_task, hid_task, return_exceptions=True)
+
+        if isinstance(xinput_res, list):
+            for d in xinput_res:
+                new_devices[d.id] = d
+        if isinstance(hid_res, list):
+            for d in hid_res:
+                new_devices[d.id] = d
 
         with self.lock:
             self.devices = new_devices

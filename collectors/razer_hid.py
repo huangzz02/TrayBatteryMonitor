@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import hid
 from .models import DeviceBattery
 
@@ -8,6 +8,10 @@ RAZER_VID = 0x1532
 TRANSACTION_IDS = [0x1F, 0x3F, 0xFF]
 
 class RazerHIDCollector:
+    def __init__(self):
+        # Cache successful (path, tid) for each PID to ensure lightning-fast subsequent polls (~15ms)
+        self._successful_path_tid: Dict[int, Tuple[bytes, int]] = {}
+
     @staticmethod
     def _create_razer_report(transaction_id: int, command_class: int, command_id: int, data_size: int) -> bytes:
         buf = bytearray(91)
@@ -34,7 +38,7 @@ class RazerHIDCollector:
             dev.open_path(path)
             report = self._create_razer_report(tid, command_class=0x07, command_id=cmd_id, data_size=0x02)
             dev.send_feature_report(report)
-            time.sleep(0.035)
+            time.sleep(0.015)
             resp = dev.get_feature_report(0x00, 91)
 
             if resp and len(resp) >= 11:
@@ -69,16 +73,27 @@ class RazerHIDCollector:
             battery_raw = -1
             charging_raw = 0
 
-            for iface in interfaces:
-                path = iface["path"]
-                for tid in TRANSACTION_IDS:
-                    val = self._query_interface(path, tid, cmd_id=0x80)
-                    if val > 0:
-                        battery_raw = val
-                        charging_raw = self._query_interface(path, tid, cmd_id=0x84)
+            # 1. Fast path: try cached (path, tid) first
+            if pid in self._successful_path_tid:
+                cached_path, cached_tid = self._successful_path_tid[pid]
+                val = self._query_interface(cached_path, cached_tid, cmd_id=0x80)
+                if val > 0:
+                    battery_raw = val
+                    charging_raw = self._query_interface(cached_path, cached_tid, cmd_id=0x84)
+
+            # 2. Probe interfaces if cache missed or device woke up on different interface
+            if battery_raw <= 0:
+                for iface in interfaces:
+                    path = iface["path"]
+                    for tid in TRANSACTION_IDS:
+                        val = self._query_interface(path, tid, cmd_id=0x80)
+                        if val > 0:
+                            battery_raw = val
+                            charging_raw = self._query_interface(path, tid, cmd_id=0x84)
+                            self._successful_path_tid[pid] = (path, tid)
+                            break
+                    if battery_raw > 0:
                         break
-                if battery_raw > 0:
-                    break
 
             if battery_raw > 0:
                 percent = max(0, min(100, round((battery_raw / 255.0) * 100)))
@@ -102,4 +117,5 @@ class RazerHIDCollector:
                         status_text="Sleeping / Disconnected"
                     )
                 )
+
         return results

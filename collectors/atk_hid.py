@@ -21,6 +21,28 @@ ATK_FALLBACK_PROBES = [
 
 def _clean_device_name(prod: str, mfr: str, pid: int) -> str:
     """Format a clean, recognizable name without raw internal dongle strings."""
+    # Known PID mappings for ATK / VXE / MADLIONS / VGN receivers
+    if pid == 0x1216:
+        return "ATK A9 SE Wireless Mouse"
+    elif pid in (0x11D9, 0x11B6):
+        return "ATK A9 Ultimate"
+    elif pid in (0x1031, 0x102E):
+        return "ATK F1 Ultimate"
+    elif pid in (0x104D, 0x103F):
+        return "VXE MAD R Wireless Mouse"
+    elif pid in (0x1040, 0x104C):
+        return "VXE MAD R Major Plus"
+    elif pid in (0x1155, 0x124F, 0x1154):
+        return "ATK Zero Wireless Mouse"
+    elif pid in (0xF58A, 0xF58C):
+        return "VXE R1 Pro Max"
+    elif pid in (0xF58E, 0xF58F):
+        return "VXE R1 SE+"
+    elif pid in (0xF503, 0xF502):
+        return "VGN F1 Pro"
+    elif pid in (0xFB3E, 0xFB3D):
+        return "VGN F2 Pro Max"
+
     if not prod:
         return f"ATK Mouse (0x{pid:04X})"
 
@@ -28,8 +50,10 @@ def _clean_device_name(prod: str, mfr: str, pid: int) -> str:
     lower_mfr = mfr.lower()
 
     if "dongle" in lower_prod or "receiver" in lower_prod:
-        if "mad" in lower_prod or "mad" in lower_mfr:
-            return "ATK MAD Wireless Mouse"
+        if "a9" in lower_prod:
+            return "ATK A9 SE Wireless Mouse"
+        elif "mad" in lower_prod or "mad" in lower_mfr:
+            return "VXE MAD R Wireless Mouse"
         elif "f1" in lower_prod:
             return "ATK F1 Wireless Mouse"
         elif "x1" in lower_prod:

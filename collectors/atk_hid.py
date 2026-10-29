@@ -83,7 +83,7 @@ class ATKHIDCollector:
     """
     Collector for ATK, VXE, MADLIONS, and VGN wireless and wired mice.
     Supports:
-      - Nordic 54L15 MCU (64-byte 0x72 protocol on Usage Page 0xFF05, sub-cmd 0x07 battery & 0x08 charging)
+      - Nordic 54L15 MCU (64-byte 0x72 protocol on Usage Page 0xFF05, sub-cmd 0x07 battery & 0x0F charging)
       - Nordic 52840 MCU (17-byte 0x04 protocol on Usage Page 0xFF02)
       - Legacy Compx feature/output report protocols
     """
@@ -118,7 +118,7 @@ class ATKHIDCollector:
         Protocol 2: Nordic 54L15 (ATK A9 SE, ATK Zero, Nano/8K receivers on Usage Page 0xFF05).
         64-byte report ID 0x08, Command 0x72:
           - sub-index 0x07 -> byte 7 is battery percentage (1-100)
-          - sub-index 0x08 -> byte 7 is PMIC charge state (0x00 = discharging, 0x01/0x02 = charging)
+          - sub-index 0x0F -> byte 7 is VBUS / charging flag (0x00 = unplugged, 0x01 = charging)
         Returns: (battery_percent, is_charging, is_wired, protocol_matched)
         """
         protocol_matched = False
@@ -153,25 +153,25 @@ class ATKHIDCollector:
                 is_wired = (link == 0)
                 is_charging = is_wired
 
-                # Query sub-index 0x08 for real-time PMIC charging state (works over 2.4G dongle & cable)
+                # Query sub-index 0x0F for real-time VBUS / charging flag (0x00 = unplugged, 0x01 = charging)
                 chg_req = bytearray(64)
                 chg_req[0] = 0x08
                 chg_req[1] = 0x7D
                 chg_req[2] = 0x72
                 chg_req[3] = 0x02
                 chg_req[5] = link
-                chg_req[6] = 0x08  # sub-index 8: charge state
+                chg_req[6] = 0x0F  # sub-index 15 (0x0F): charging flag
                 chg_req[7] = 0x01
 
                 try:
                     chg_res = self._transact(
                         dev,
                         bytes(chg_req),
-                        lambda r: len(r) >= 8 and r[0] == 0x08 and r[1] == 0x72 and r[5] == 0x08,
+                        lambda r: len(r) >= 8 and r[0] == 0x08 and r[1] == 0x72 and r[5] == 0x0F,
                         timeout=0.10,
                     )
                     if chg_res and chg_res[2] == 0:
-                        is_charging = chg_res[7] in (0x01, 0x02)
+                        is_charging = is_wired or (chg_res[7] > 0)
                 except Exception:
                     pass
 

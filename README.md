@@ -36,7 +36,7 @@
 | **雷蛇 Razer 2.4G** | `razer_hid.py` | Razer 專屬 2.4G HID Feature Report (`0x07` Command Class)。支援毒蝰 (Viper)、巴蛇 (Basilisk)、煉獄蝰蛇 (DeathAdder) 等。 |
 | **羅技 Logitech 2.4G** | `logitech_hid.py` | Logitech Lightspeed / Unifying HID++ 1.0 & 2.0 協定。支援 G502 系列、GPW、Superlight 1/2、G304、G703 等（自動過濾有線設備）。 |
 | **SONY PlayStation** | `sony_hid.py` | Sony 官方標準 HID 協定。支援 PS5 DualSense、DualSense Edge、PS4 DualShock 4（藍牙 / USB）。 |
-| **ATK / VXE / 蜻蜓** | `atk_hid.py` | 專屬 HID 探針封包。支援 VXE R1、蜻蜓 F1、ATK 烈空、Mad R 等熱門 2.4G 滑鼠（支援充電中識別）。 |
+| **ATK / VXE / 蜻蜓** | `atk_hid.py` | Nordic 52840 & 54L15 雙世代專屬 HID 協定。支援 ATK A9 系列 (A9 SE / Ultimate)、烈空 F1 / X1、Zero、VXE R1、MAD R 等 2.4G 滑鼠（支援無線 / 有線即時充電狀態識別）。 |
 | **HyperX 2.4G 耳機** | `hyperx_hid.py` | HyperX 專屬 HID 遙測。支援 Cloud II Wireless、Cloud Alpha Wireless (300h)、Cloud Flight 等。 |
 | **SteelSeries 賽睿** | `steelseries_hid.py` | 賽睿 2.4G HID Feature Report。支援 Aerox 3/5/9、Rival 3/650、Prime、Arctis/Nova 系列耳機。 |
 | **Corsair 海盜船** | `corsair_hid.py` | Corsair Slipstream 2.4G 協定。支援 Dark Core、Harpoon、HS70/HS80、Virtuoso 等。 |

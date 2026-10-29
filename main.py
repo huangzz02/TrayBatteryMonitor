@@ -8,6 +8,7 @@ import threading
 import logging
 import winreg
 import ctypes
+from ctypes import wintypes
 from typing import Dict, Optional, List, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
@@ -16,17 +17,19 @@ from pystray import Menu, MenuItem
 import pystray._win32 as pwin32
 import pystray._util.win32 as win32
 
-from collectors.models import DeviceBattery
-from collectors.ble_collector import BLECollector
-from collectors.razer_hid import RazerHIDCollector
-from collectors.atk_hid import ATKHIDCollector
-from collectors.xinput_collector import XInputCollector
-from collectors.logitech_hid import LogitechHIDCollector
-from collectors.sony_hid import SonyHIDCollector
-from collectors.hyperx_hid import HyperXHIDCollector
-from collectors.steelseries_hid import SteelSeriesHIDCollector
-from collectors.corsair_hid import CorsairHIDCollector
-from collectors.asus_hid import ASUSHIDCollector
+from collectors import (
+    DeviceBattery,
+    BLECollector,
+    RazerHIDCollector,
+    ATKHIDCollector,
+    XInputCollector,
+    LogitechHIDCollector,
+    SonyHIDCollector,
+    HyperXHIDCollector,
+    SteelSeriesHIDCollector,
+    CorsairHIDCollector,
+    ASUSHIDCollector,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -39,16 +42,17 @@ APP_NAME = "TrayBatteryMonitor"
 # to 0 for all icons. On Windows 11, sharing uID=0 causes
 # taskbar drag-and-drop to scramble and invert the icons.
 # ---------------------------------------------------------
-_orig_message = pwin32.Icon._message
-
 def _patched_message(self, code, flags, **kwargs):
+    hwnd = getattr(self, "_hwnd", None)
+    if not hwnd:
+        return 0
     uid = getattr(self, "uid", None)
     if uid is None:
         name_str = getattr(self, "name", "")
         uid = (abs(hash(name_str)) % 100000) + 100
     return win32.Shell_NotifyIcon(code, win32.NOTIFYICONDATAW(
         cbSize=ctypes.sizeof(win32.NOTIFYICONDATAW),
-        hWnd=self._hwnd,
+        hWnd=hwnd,
         uID=uid,
         uFlags=flags,
         **kwargs))
@@ -123,15 +127,34 @@ def load_config() -> dict:
 
 def save_config(cfg: dict):
     path = get_config_path()
+    tmp_path = f"{path}.tmp"
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
     except Exception as e:
         logging.error(f"Error saving config.json: {e}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 # ---------------------------------------------------------
 # Icon Rendering (Theme 1: Thick Ring + Centered Digits)
 # ---------------------------------------------------------
+_FONT_CACHE: Dict[int, ImageFont.ImageFont] = {}
+
+def _get_icon_font(font_size: int) -> ImageFont.ImageFont:
+    font = _FONT_CACHE.get(font_size)
+    if font is None:
+        try:
+            font = ImageFont.truetype("segoeuib.ttf", font_size)
+        except Exception:
+            font = ImageFont.load_default()
+        _FONT_CACHE[font_size] = font
+    return font
+
 def render_battery_icon(
     percent: Optional[int] = None,
     is_charging: bool = False,
@@ -174,10 +197,7 @@ def render_battery_icon(
     # Number: large, bold, and mathematically centered in the circle
     text = "--" if percent is None else str(pct)
     font_size = 92 if len(text) >= 3 else 122
-    try:
-        font = ImageFont.truetype("segoeuib.ttf", font_size)
-    except Exception:
-        font = ImageFont.load_default()
+    font = _get_icon_font(font_size)
 
     bbox = draw.textbbox((0, 0), text, font=font)
     tx = cx - (bbox[0] + bbox[2]) / 2.0
@@ -452,17 +472,24 @@ class BatteryMonitorApp:
         with self.lock:
             all_devs = list(self.devices.values())
             hidden_set = set(self.config.get("hidden_devices", []))
+            config_changed = False
 
             # Store friendly names
+            names_map = self.config.setdefault("hidden_device_names", {})
             for d in all_devs:
-                self.config.setdefault("hidden_device_names", {})[d.id] = d.name
+                if names_map.get(d.id) != d.name:
+                    names_map[d.id] = d.name
+                    config_changed = True
 
             # Maintain deterministic device_order
             order = self.config.setdefault("device_order", [])
             for d in all_devs:
                 if d.id not in order:
                     order.append(d.id)
-            self._save_config()
+                    config_changed = True
+
+            if config_changed:
+                self._save_config()
 
             visible_devs = [d for d in all_devs if d.id not in hidden_set]
             visible_devs.sort(key=lambda d: order.index(d.id) if d.id in order else 9999)
@@ -678,9 +705,12 @@ _SINGLE_INSTANCE_MUTEX = None
 def ensure_single_instance() -> bool:
     global _SINGLE_INSTANCE_MUTEX
     mutex_name = r"Local\TrayBatteryMonitor_SingleInstance_Mutex"
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    ctypes.set_last_error(0)
     _SINGLE_INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, mutex_name)
-    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         logging.warning("Another instance of TrayBatteryMonitor is already running. Exiting.")
         return False
     return True

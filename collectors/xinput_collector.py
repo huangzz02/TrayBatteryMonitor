@@ -19,20 +19,31 @@ LEVEL_MAP = {
     BATTERY_LEVEL_FULL: (100, "Full (100%)"),
 }
 
+
 class XINPUT_BATTERY_INFORMATION(ctypes.Structure):
     _fields_ = [
         ("BatteryType", wintypes.BYTE),
         ("BatteryLevel", wintypes.BYTE),
     ]
 
+
 class XInputCollector:
     def __init__(self):
         self.dll = None
         for dll_name in ("XInput1_4.dll", "xinput1_3.dll"):
             try:
-                self.dll = ctypes.WinDLL(dll_name)
+                dll = ctypes.WinDLL(dll_name)
+                dll.XInputGetState.argtypes = [wintypes.DWORD, ctypes.c_void_p]
+                dll.XInputGetState.restype = wintypes.DWORD
+                dll.XInputGetBatteryInformation.argtypes = [
+                    wintypes.DWORD,
+                    wintypes.BYTE,
+                    ctypes.POINTER(XINPUT_BATTERY_INFORMATION),
+                ]
+                dll.XInputGetBatteryInformation.restype = wintypes.DWORD
+                self.dll = dll
                 break
-            except OSError:
+            except (OSError, AttributeError):
                 continue
 
     def collect(self) -> List[DeviceBattery]:
@@ -51,7 +62,7 @@ class XInputCollector:
             res_batt = self.dll.XInputGetBatteryInformation(
                 user_idx,
                 BATTERY_DEVTYPE_GAMEPAD,
-                ctypes.byref(batt_info)
+                ctypes.byref(batt_info),
             )
             if res_batt == 0 and batt_info.BatteryType != BATTERY_TYPE_DISCONNECTED:
                 if batt_info.BatteryType == BATTERY_TYPE_WIRED:
@@ -62,7 +73,7 @@ class XInputCollector:
                             protocol="XInput",
                             battery_percent=100,
                             is_charging=True,
-                            status_text="Wired"
+                            status_text="Wired",
                         )
                     )
                 else:
@@ -73,7 +84,7 @@ class XInputCollector:
                             name=f"Xbox Controller #{user_idx + 1}",
                             protocol="XInput",
                             battery_percent=pct,
-                            status_text=desc
+                            status_text=desc,
                         )
                     )
         return results

@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import List, Tuple
+from typing import List, Set, Tuple
 import hid
 from .models import DeviceBattery
 
@@ -9,7 +9,14 @@ ASUS_VID = 0x0B05
 # ASUS ROG Wireless battery query probe
 ASUS_BATTERY_PROBE = bytes([0x51, 0x12, 0x00, 0x00] + [0x00] * 60)
 
+# Internal ASUS motherboard / audio / lighting controllers that never have batteries
+IGNORED_ASUS_KEYWORDS = ("aura", "usb audio", "motherboard", "led controller")
+
+
 class ASUSHIDCollector:
+    def __init__(self):
+        self._ignored_pids: Set[int] = set()
+
     def _probe_device(self, path: bytes) -> Tuple[int, bool]:
         dev = hid.device()
         try:
@@ -23,11 +30,11 @@ class ASUSHIDCollector:
                 if resp and len(resp) >= 6:
                     pct = resp[4]
                     if 1 <= pct <= 100:
-                        is_charging = (resp[5] == 0x01 if len(resp) > 5 else False)
+                        is_charging = resp[5] == 0x01 if len(resp) > 5 else False
                         return pct, is_charging
                     pct2 = resp[5]
                     if 1 <= pct2 <= 100:
-                        is_charging = (resp[6] == 0x01 if len(resp) > 6 else False)
+                        is_charging = resp[6] == 0x01 if len(resp) > 6 else False
                         return pct2, is_charging
             except Exception:
                 pass
@@ -54,11 +61,17 @@ class ASUSHIDCollector:
             pid = d.get("product_id", 0)
             path = d.get("path")
 
-            if usage_page < 0xFF00 or pid in seen_pids:
+            if usage_page < 0xFF00 or pid in seen_pids or pid in self._ignored_pids:
+                continue
+
+            raw_prod = (d.get("product_string") or "").strip()
+            lower_prod = raw_prod.lower()
+            if any(kw in lower_prod for kw in IGNORED_ASUS_KEYWORDS):
+                self._ignored_pids.add(pid)
                 continue
 
             percent, is_charging = self._probe_device(path)
-            prod_name = d.get("product_string") or f"ASUS ROG Device (0x{pid:04X})"
+            prod_name = raw_prod or f"ASUS ROG Device (0x{pid:04X})"
 
             if 1 <= percent <= 100:
                 seen_pids.add(pid)
@@ -69,7 +82,7 @@ class ASUSHIDCollector:
                         protocol="ASUS ROG 2.4G",
                         battery_percent=percent,
                         is_charging=is_charging,
-                        status_text="Connected"
+                        status_text="Connected",
                     )
                 )
 

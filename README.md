@@ -17,9 +17,11 @@
 - **Theme 1 專屬視覺**：超粗外圈進度圓環 + 正中心超大數字；充電中文字反黃、低電量紅圈警示、離線顯示 `--`。
 - **Windows 11 拖曳排序修復**：底層 Monkey-patch 攔截注入獨立唯一的 `uID`，徹底解決 Windows 11 托盤拖曳倒置的系統 Bug。
 - **全自動工作列釘選 (Auto-Promoted)**：自動掃描系統登錄檔提拔新圖示，再也不用手動將圖示從 `^` 溢出摺疊區拖出來。
-- **動態設備屏蔽機制 (Dynamic Hide/Unhide)**：
-  - 點擊選單即可隨時隱藏任意設備。
-  - **斷連自動隱形**：關機或斷開連線的設備不會佔用 `Hidden Devices` 子清單，只有在連線時才動態出現。
+- **Power Guard 智慧節電與防喚醒盾 (Zero-RF Wireless Sleep Protection)**：
+  - 獨立追蹤實體滑鼠游標與點擊（打字不重設計時器），靜止時發動 100% 射頻靜音，徹底解決無線電競滑鼠（如 ATK、羅技等）因輪詢而無法深度休眠的問題。
+  - 休眠時自動顯示半透明灰色圖示（保留最後已知電量），一動滑鼠 1 秒秒級喚醒。
+- **單一勾選式托盤顯示管理 (Show on Taskbar)**：
+  - 單一選單以 Windows 原生打勾（✓）直覺管理工作列圖示，不再需要在混亂的隱藏/解封選單間切換。
 - **單一實例防重複啟動 (Single Instance Mutex)**：採用 Windows 原生具名互斥鎖，重複點擊 exe 0.9 秒內靜默自動退出，防止多開。
 - **開機自動啟動 (Start with Windows)**：整合 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，免 UAC 提權，登入即啟動。
 
@@ -51,6 +53,7 @@ TrayBatteryMonitor/
 ├── collectors/                # 獨立設備收集器模組 (完全解耦)
 │   ├── __init__.py
 │   ├── models.py              # DeviceBattery 資料模型
+│   ├── power_guard.py         # 滑鼠活動追蹤與零射頻防喚醒狀態機
 │   ├── ble_collector.py       # WinRT 藍牙 BLE
 │   ├── razer_hid.py           # 雷蛇 2.4G
 │   ├── logitech_hid.py        # 羅技 Lightspeed / HID++
@@ -110,11 +113,9 @@ TrayBatteryMonitor/
 ```text
 [設備名稱]: [電量]% [(Charging)]
 -----------------------------
-Hide Device      >  [列出所有當前在線設備，點擊即可隱藏]
-Hidden Devices   >  [僅列出當前在線且被隱藏的設備，點擊解封]
+Show on Taskbar  >  [✓ 勾選顯示於工作列，取消勾選收進後台]
 -----------------------------
 Refresh Now         [手動強制立即刷新一次]
-Update Speed     >  Fast (2s) / Normal (10s) / Eco (60s)
 Start with Windows  [開機自動啟動開關]
 -----------------------------
 Exit                [退出程式]

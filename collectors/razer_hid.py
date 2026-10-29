@@ -1,16 +1,29 @@
 import time
 import logging
-from typing import List, Dict, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 import hid
 from .models import DeviceBattery
+from .power_guard import get_refresh_generation, sample_mouse_activity
 
 RAZER_VID = 0x1532
 TRANSACTION_IDS = [0x1F, 0x3F, 0xFF]
 
+
+@dataclass
+class _RazerDeviceState:
+    percent: Optional[int] = None
+    is_charging: bool = False
+    last_poll_mono: float = 0.0
+    last_refresh_gen: int = 0
+
+
 class RazerHIDCollector:
     def __init__(self):
         # Cache successful (path, tid) for each PID to ensure lightning-fast subsequent polls (~15ms)
+        # and avoid multi-interface probe storms when a wireless mouse/headset enters sleep mode.
         self._successful_path_tid: Dict[int, Tuple[bytes, int]] = {}
+        self._states: Dict[int, _RazerDeviceState] = {}
 
     @staticmethod
     def _create_razer_report(transaction_id: int, command_class: int, command_id: int, data_size: int) -> bytes:
@@ -55,6 +68,36 @@ class RazerHIDCollector:
                 pass
         return -1
 
+    def _should_poll(self, pid: int, state: _RazerDeviceState, has_cached_endpoint: bool) -> bool:
+        now = time.monotonic()
+        cur_gen = get_refresh_generation()
+        idle_sec, last_active_mono = sample_mouse_activity()
+
+        if state.last_refresh_gen != cur_gen or state.last_poll_mono <= 0.0:
+            return True
+
+        elapsed = now - state.last_poll_mono
+
+        if state.percent is not None:
+            # Awake: allow one settle check right after cursor stops (catches dock charging quickly),
+            # otherwise poll dongle gently every 15s instead of every 2s.
+            if 1.5 <= idle_sec < 6.0 and state.last_poll_mono < last_active_mono:
+                return True
+            return elapsed >= 15.0
+
+        # Currently sleeping / disconnected
+        if has_cached_endpoint:
+            # Known endpoint costs only 1 Feature Report: wake immediately on mouse move, or check every 15s for headsets
+            if last_active_mono > state.last_poll_mono:
+                return True
+            return elapsed >= 15.0
+
+        # Unknown endpoint (e.g. powered-off headset dongle at boot or wired non-battery Razer peripheral):
+        # throttle full multi-interface discovery to avoid hammering USB every 2s
+        if last_active_mono > state.last_poll_mono and elapsed >= 10.0:
+            return True
+        return elapsed >= 30.0
+
     def collect(self) -> List[DeviceBattery]:
         results: List[DeviceBattery] = []
         try:
@@ -68,43 +111,72 @@ class RazerHIDCollector:
             pid = d["product_id"]
             grouped_by_pid.setdefault(pid, []).append(d)
 
+        # Clean up unplugged Razer devices
+        for stale_pid in list(self._states.keys()):
+            if stale_pid not in grouped_by_pid:
+                self._states.pop(stale_pid, None)
+                self._successful_path_tid.pop(stale_pid, None)
+
+        now = time.monotonic()
+        cur_gen = get_refresh_generation()
+
         for pid, interfaces in grouped_by_pid.items():
             product_name = interfaces[0].get("product_string") or f"Razer Device (0x{pid:04X})"
-            battery_raw = -1
-            charging_raw = 0
+            state = self._states.setdefault(pid, _RazerDeviceState())
 
-            # 1. Fast path: try cached (path, tid) first
-            if pid in self._successful_path_tid:
-                cached_path, cached_tid = self._successful_path_tid[pid]
-                val = self._query_interface(cached_path, cached_tid, cmd_id=0x80)
-                if val > 0:
-                    battery_raw = val
-                    charging_raw = self._query_interface(cached_path, cached_tid, cmd_id=0x84)
+            cached_entry = self._successful_path_tid.get(pid)
+            cached_valid = (
+                cached_entry is not None
+                and any(iface.get("path") == cached_entry[0] for iface in interfaces)
+            )
+            if cached_entry is not None and not cached_valid:
+                self._successful_path_tid.pop(pid, None)
 
-            # 2. Probe interfaces if cache missed or device woke up on different interface
-            if battery_raw <= 0:
-                for iface in interfaces:
-                    path = iface["path"]
-                    for tid in TRANSACTION_IDS:
-                        val = self._query_interface(path, tid, cmd_id=0x80)
-                        if val > 0:
-                            battery_raw = val
-                            charging_raw = self._query_interface(path, tid, cmd_id=0x84)
-                            self._successful_path_tid[pid] = (path, tid)
+            if self._should_poll(pid, state, cached_valid):
+                battery_raw = -1
+                charging_raw = 0
+
+                if cached_valid and cached_entry is not None:
+                    # 1. Fast path: query ONLY the verified (path, tid).
+                    #    When val <= 0, the wireless device is sleeping — do NOT fall through
+                    #    to blast all other HID interfaces and transaction IDs!
+                    cached_path, cached_tid = cached_entry
+                    val = self._query_interface(cached_path, cached_tid, cmd_id=0x80)
+                    if val > 0:
+                        battery_raw = val
+                        charging_raw = self._query_interface(cached_path, cached_tid, cmd_id=0x84)
+                else:
+                    # 2. Initial discovery scan across interfaces & transaction IDs
+                    for iface in interfaces:
+                        path = iface["path"]
+                        for tid in TRANSACTION_IDS:
+                            val = self._query_interface(path, tid, cmd_id=0x80)
+                            if val > 0:
+                                battery_raw = val
+                                charging_raw = self._query_interface(path, tid, cmd_id=0x84)
+                                self._successful_path_tid[pid] = (path, tid)
+                                break
+                        if battery_raw > 0:
                             break
-                    if battery_raw > 0:
-                        break
 
-            if battery_raw > 0:
-                percent = max(0, min(100, round((battery_raw / 255.0) * 100)))
+                state.last_poll_mono = now
+                state.last_refresh_gen = cur_gen
+                if battery_raw > 0:
+                    state.percent = max(0, min(100, round((battery_raw / 255.0) * 100)))
+                    state.is_charging = (charging_raw == 1)
+                else:
+                    state.percent = None
+                    state.is_charging = False
+
+            if state.percent is not None:
                 results.append(
                     DeviceBattery(
                         id=f"razer_{pid:04x}",
                         name=product_name,
                         protocol="Razer 2.4G",
-                        battery_percent=percent,
-                        is_charging=(charging_raw == 1),
-                        status_text="Connected"
+                        battery_percent=state.percent,
+                        is_charging=state.is_charging,
+                        status_text="Connected",
                     )
                 )
             else:
@@ -114,7 +186,7 @@ class RazerHIDCollector:
                         name=product_name,
                         protocol="Razer 2.4G",
                         battery_percent=None,
-                        status_text="Sleeping / Disconnected"
+                        status_text="Sleeping / Disconnected",
                     )
                 )
 

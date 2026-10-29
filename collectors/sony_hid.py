@@ -1,8 +1,10 @@
 import time
 import logging
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 import hid
 from .models import DeviceBattery
+from .power_guard import get_refresh_generation
 
 SONY_VID = 0x054C
 
@@ -14,8 +16,23 @@ SONY_PIDS = {
     0x0BA0: "DualShock 4 USB Wireless Adapter",
 }
 
+
+@dataclass
+class _SonyControllerState:
+    percent: Optional[int] = None
+    is_charging: bool = False
+    last_read_mono: float = 0.0
+    last_success_mono: float = 0.0
+    last_refresh_gen: int = 0
+
+
 class SonyHIDCollector:
+    def __init__(self):
+        self._cached_paths: Dict[int, bytes] = {}
+        self._states: Dict[int, _SonyControllerState] = {}
+
     def _read_controller_state(self, path: bytes, pid: int) -> Tuple[int, bool]:
+        """100% passive read of standard PlayStation HID input reports (zero TX packets sent)."""
         dev = hid.device()
         try:
             dev.open_path(path)
@@ -84,26 +101,79 @@ class SonyHIDCollector:
         except Exception:
             return results
 
-        seen_pids = set()
+        grouped: Dict[int, List[dict]] = {}
         for d in devices:
             pid = d.get("product_id", 0)
-            if pid not in SONY_PIDS or pid in seen_pids:
-                continue
+            if pid in SONY_PIDS:
+                grouped.setdefault(pid, []).append(d)
 
-            path = d.get("path")
-            percent, is_charging = self._read_controller_state(path, pid)
+        for stale_pid in list(self._states.keys()):
+            if stale_pid not in grouped:
+                self._states.pop(stale_pid, None)
+                self._cached_paths.pop(stale_pid, None)
 
-            if 0 <= percent <= 100:
-                seen_pids.add(pid)
-                prod_name = SONY_PIDS.get(pid, d.get("product_string") or "PlayStation Controller")
+        now = time.monotonic()
+        cur_gen = get_refresh_generation()
+
+        for pid, ifaces in grouped.items():
+            prod_name = SONY_PIDS.get(pid, ifaces[0].get("product_string") or "PlayStation Controller")
+            state = self._states.setdefault(pid, _SonyControllerState())
+
+            cached_path = self._cached_paths.get(pid)
+            if cached_path and not any(d.get("path") == cached_path for d in ifaces):
+                self._cached_paths.pop(pid, None)
+                cached_path = None
+
+            should_read = (
+                state.last_refresh_gen != cur_gen
+                or state.last_read_mono <= 0.0
+                or (now - state.last_read_mono) >= 15.0
+            )
+
+            if should_read:
+                state.last_read_mono = now
+                state.last_refresh_gen = cur_gen
+                percent = -1
+                is_charging = False
+
+                if cached_path is not None:
+                    percent, is_charging = self._read_controller_state(cached_path, pid)
+                else:
+                    for d in ifaces:
+                        path = d.get("path")
+                        percent, is_charging = self._read_controller_state(path, pid)
+                        if 0 <= percent <= 100:
+                            self._cached_paths[pid] = path
+                            break
+
+                if 0 <= percent <= 100:
+                    state.percent = percent
+                    state.is_charging = is_charging
+                    state.last_success_mono = now
+                elif pid == 0x0BA0 and (now - state.last_success_mono) >= 30.0:
+                    # DualShock 4 USB Wireless Adapter stays plugged in when controller powers off
+                    state.percent = None
+                    state.is_charging = False
+
+            if state.percent is not None:
                 results.append(
                     DeviceBattery(
                         id=f"sony_{pid:04x}",
                         name=prod_name,
                         protocol="PlayStation HID",
-                        battery_percent=percent,
-                        is_charging=is_charging,
-                        status_text="Connected"
+                        battery_percent=state.percent,
+                        is_charging=state.is_charging,
+                        status_text="Connected",
+                    )
+                )
+            elif pid == 0x0BA0 and state.last_success_mono > 0.0:
+                results.append(
+                    DeviceBattery(
+                        id=f"sony_{pid:04x}",
+                        name=prod_name,
+                        protocol="PlayStation HID",
+                        battery_percent=None,
+                        status_text="Sleeping / Inactive",
                     )
                 )
 

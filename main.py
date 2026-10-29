@@ -19,6 +19,7 @@ import pystray._util.win32 as win32
 
 from collectors import (
     DeviceBattery,
+    trigger_manual_refresh,
     BLECollector,
     RazerHIDCollector,
     ATKHIDCollector,
@@ -110,7 +111,7 @@ def auto_promote_icons():
 def load_config() -> dict:
     path = get_config_path()
     defaults = {
-        "poll_interval": 10.0,
+        "poll_interval": 1.0,
         "hidden_devices": [],
         "hidden_device_names": {},
         "device_order": [],
@@ -264,7 +265,7 @@ class BatteryMonitorApp:
         self.lock = threading.RLock()
         self.running = True
         self.force_refresh_event = threading.Event()
-        self.poll_interval: float = float(self.config.get("poll_interval", 10.0))
+        self.poll_interval: float = float(self.config.get("poll_interval", 1.0))
 
         self.ble_collector = BLECollector()
         self.razer_collector = RazerHIDCollector()
@@ -346,30 +347,23 @@ class BatteryMonitorApp:
             self.last_icon_state.clear()
         self._sync_icons()
 
-    def hide_device(self, dev_id: str):
-        with self.lock:
-            hidden_list = self.config.setdefault("hidden_devices", [])
-            if dev_id not in hidden_list:
-                hidden_list.append(dev_id)
-            if dev_id in self.devices:
-                self.config.setdefault("hidden_device_names", {})[dev_id] = self.devices[dev_id].name
-            self._save_config()
-
-            if dev_id in self.device_icons:
-                try:
-                    self.device_icons[dev_id].stop()
-                except Exception:
-                    pass
-                del self.device_icons[dev_id]
-                self.last_icon_state.pop(dev_id, None)
-
-        self._sync_icons(force_update_menus=True)
-
-    def unhide_device(self, dev_id: str):
+    def toggle_device_visibility(self, dev_id: str):
         with self.lock:
             hidden_list = self.config.setdefault("hidden_devices", [])
             if dev_id in hidden_list:
                 hidden_list.remove(dev_id)
+            else:
+                hidden_list.append(dev_id)
+                if dev_id in self.devices:
+                    self.config.setdefault("hidden_device_names", {})[dev_id] = self.devices[dev_id].name
+                if dev_id in self.device_icons:
+                    try:
+                        self.device_icons[dev_id].stop()
+                    except Exception:
+                        pass
+                    del self.device_icons[dev_id]
+                    self.last_icon_state.pop(dev_id, None)
+
             self._save_config()
             self.last_icon_state.clear()
 
@@ -381,7 +375,6 @@ class BatteryMonitorApp:
         with self.lock:
             all_devs = list(self.devices.values())
             hidden_set = set(self.config.get("hidden_devices", []))
-            hidden_names = dict(self.config.get("hidden_device_names", {}))
             order = list(self.config.get("device_order", []))
 
             visible_devs = [d for d in all_devs if d.id not in hidden_set]
@@ -406,56 +399,30 @@ class BatteryMonitorApp:
 
         items.append(Menu.SEPARATOR)
 
-        # Hide Device Submenu (Lists all visible devices to hide on click)
-        hide_items = []
-        for vd in visible_devs:
-            hide_items.append(
+        # Show on Taskbar Submenu (Checkmark toggle for all active / connected devices)
+        taskbar_items = []
+        manageable_devs = [
+            d for d in all_devs
+            if d.id not in hidden_set or is_device_connected(d)
+        ]
+        manageable_devs.sort(key=lambda d: order.index(d.id) if d.id in order else 9999)
+
+        for d in manageable_devs:
+            taskbar_items.append(
                 MenuItem(
-                    vd.name,
-                    (lambda did: lambda icon, item: self.hide_device(did))(vd.id)
+                    d.name,
+                    (lambda did: lambda icon, item: self.toggle_device_visibility(did))(d.id),
+                    checked=(lambda did: lambda item: did not in self.config.get("hidden_devices", []))(d.id)
                 )
             )
 
-        if hide_items:
-            items.append(MenuItem("Hide Device", Menu(*hide_items)))
+        if taskbar_items:
+            items.append(MenuItem("Show on Taskbar", Menu(*taskbar_items)))
         else:
-            items.append(MenuItem("Hide Device", Menu(MenuItem("(None)", None, enabled=False))))
-
-        # Hidden Devices Submenu (Only shows devices that are currently CONNECTED and HIDDEN)
-        hidden_items = []
-        for h_id in self.config.get("hidden_devices", []):
-            dev = self.devices.get(h_id)
-            if dev and is_device_connected(dev):
-                h_name = dev.name or hidden_names.get(h_id, h_id)
-                hidden_items.append(
-                    MenuItem(
-                        h_name,
-                        (lambda did: lambda icon, item: self.unhide_device(did))(h_id)
-                    )
-                )
-
-        if hidden_items:
-            items.append(MenuItem("Hidden Devices", Menu(*hidden_items)))
-        else:
-            items.append(MenuItem("Hidden Devices", Menu(MenuItem("(None)", None, enabled=False))))
+            items.append(MenuItem("Show on Taskbar", Menu(MenuItem("(No devices)", None, enabled=False))))
 
         items.append(Menu.SEPARATOR)
         items.append(MenuItem("Refresh Now", self.on_refresh_clicked))
-
-        # Update Speed Submenu (Pure text)
-        def make_speed_action(sec):
-            return lambda icon, item: self._set_poll_interval(sec)
-
-        def make_speed_check(sec):
-            return lambda item: abs(self.poll_interval - sec) < 0.1
-
-        speed_menu = Menu(
-            MenuItem("Fast (2s)", make_speed_action(2.0), checked=make_speed_check(2.0), radio=True),
-            MenuItem("Normal (10s)", make_speed_action(10.0), checked=make_speed_check(10.0), radio=True),
-            MenuItem("Eco (60s)", make_speed_action(60.0), checked=make_speed_check(60.0), radio=True)
-        )
-        items.append(MenuItem("Update Speed", speed_menu))
-
         items.append(
             MenuItem(
                 "Start with Windows",
@@ -667,6 +634,7 @@ class BatteryMonitorApp:
         loop.close()
 
     def on_refresh_clicked(self, icon, item):
+        trigger_manual_refresh()
         with self.lock:
             self.last_icon_state.clear()
         self.force_refresh_event.set()

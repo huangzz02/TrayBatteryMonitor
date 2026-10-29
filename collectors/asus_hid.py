@@ -1,8 +1,14 @@
 import time
 import logging
-from typing import List, Set, Tuple
+from typing import Dict, List, Set, Tuple
 import hid
 from .models import DeviceBattery
+from .power_guard import (
+    WirelessMouseState,
+    decide_mouse_rf_action,
+    get_refresh_generation,
+    sample_mouse_activity,
+)
 
 ASUS_VID = 0x0B05
 
@@ -12,10 +18,25 @@ ASUS_BATTERY_PROBE = bytes([0x51, 0x12, 0x00, 0x00] + [0x00] * 60)
 # Internal ASUS motherboard / audio / lighting controllers that never have batteries
 IGNORED_ASUS_KEYWORDS = ("aura", "usb audio", "motherboard", "led controller")
 
+_NON_MOUSE_KEYWORDS = (
+    "headset",
+    "delta",
+    "cetra",
+    "pelta",
+    "keyboard",
+    "azoth",
+    "falchion",
+    "scope",
+    "claymore",
+)
+
 
 class ASUSHIDCollector:
     def __init__(self):
         self._ignored_pids: Set[int] = set()
+        self._cached_paths: Dict[int, bytes] = {}
+        self._states: Dict[int, WirelessMouseState] = {}
+        self._last_discovery_mono: Dict[int, Tuple[float, int]] = {}
 
     def _probe_device(self, path: bytes) -> Tuple[int, bool]:
         dev = hid.device()
@@ -55,35 +76,135 @@ class ASUSHIDCollector:
         except Exception:
             return results
 
-        seen_pids = set()
+        grouped: Dict[int, List[dict]] = {}
         for d in devices:
             usage_page = d.get("usage_page", 0)
             pid = d.get("product_id", 0)
-            path = d.get("path")
-
-            if usage_page < 0xFF00 or pid in seen_pids or pid in self._ignored_pids:
+            if usage_page < 0xFF00 or pid in self._ignored_pids:
                 continue
 
             raw_prod = (d.get("product_string") or "").strip()
-            lower_prod = raw_prod.lower()
-            if any(kw in lower_prod for kw in IGNORED_ASUS_KEYWORDS):
+            if any(kw in raw_prod.lower() for kw in IGNORED_ASUS_KEYWORDS):
                 self._ignored_pids.add(pid)
                 continue
 
-            percent, is_charging = self._probe_device(path)
-            prod_name = raw_prod or f"ASUS ROG Device (0x{pid:04X})"
+            grouped.setdefault(pid, []).append(d)
 
-            if 1 <= percent <= 100:
-                seen_pids.add(pid)
-                results.append(
-                    DeviceBattery(
-                        id=f"asus_{pid:04x}",
-                        name=prod_name,
-                        protocol="ASUS ROG 2.4G",
-                        battery_percent=percent,
-                        is_charging=is_charging,
-                        status_text="Connected",
-                    )
+        for stale_pid in list(self._states.keys()):
+            if stale_pid not in grouped:
+                self._states.pop(stale_pid, None)
+                self._cached_paths.pop(stale_pid, None)
+                self._last_discovery_mono.pop(stale_pid, None)
+        for stale_pid in list(self._last_discovery_mono.keys()):
+            if stale_pid not in grouped:
+                self._last_discovery_mono.pop(stale_pid, None)
+
+        now = time.monotonic()
+        cur_gen = get_refresh_generation()
+        _, last_active_mono = sample_mouse_activity()
+
+        for pid, ifaces in grouped.items():
+            raw_prod = (ifaces[0].get("product_string") or "").strip()
+            prod_name = raw_prod or f"ASUS ROG Device (0x{pid:04X})"
+            is_non_mouse = any(kw in prod_name.lower() for kw in _NON_MOUSE_KEYWORDS)
+
+            cached_path = self._cached_paths.get(pid)
+            if cached_path and not any(d.get("path") == cached_path for d in ifaces):
+                self._cached_paths.pop(pid, None)
+                cached_path = None
+
+            # 1. Verified wireless device fast path (sleep-safe)
+            if cached_path is not None:
+                state = self._states.setdefault(
+                    pid,
+                    WirelessMouseState(sleep_timeout_sec=180.0, name=prod_name),
                 )
+                state.name = prod_name
+
+                if is_non_mouse:
+                    interval = 30.0 if state.is_sleeping else 60.0
+                    should_query = (
+                        state.last_refresh_gen != cur_gen
+                        or state.last_rf_poll_mono <= 0.0
+                        or (now - max(state.last_rf_poll_mono, state.last_wake_check_mono)) >= interval
+                    )
+                else:
+                    action = decide_mouse_rf_action(state, active_interval=30.0, charging_interval=30.0, sleep_buffer_sec=5.0)
+                    should_query = action in ("poll_full", "check_sleep_only")
+
+                if should_query:
+                    state.last_wake_check_mono = now
+                    state.last_refresh_gen = cur_gen
+                    pct, is_charging = self._probe_device(cached_path)
+                    if 1 <= pct <= 100:
+                        state.percent = pct
+                        state.is_charging = is_charging
+                        state.is_sleeping = False
+                        state.last_rf_poll_mono = now
+                    else:
+                        if not state.is_sleeping:
+                            state.sleep_confirmed_mono = now
+                        state.is_sleeping = True
+                        state.is_charging = False
+
+                if not state.is_sleeping and state.percent is not None:
+                    results.append(
+                        DeviceBattery(
+                            id=f"asus_{pid:04x}",
+                            name=prod_name,
+                            protocol="ASUS ROG 2.4G",
+                            battery_percent=state.percent,
+                            is_charging=state.is_charging,
+                            status_text="Connected",
+                        )
+                    )
+                else:
+                    results.append(
+                        DeviceBattery(
+                            id=f"asus_{pid:04x}",
+                            name=prod_name,
+                            protocol="ASUS ROG 2.4G",
+                            battery_percent=None,
+                            status_text="Sleeping / Inactive",
+                        )
+                    )
+                continue
+
+            # 2. Throttled initial discovery so wired ASUS peripherals / sleeping receivers aren't probed every 2s
+            last_disc_mono, last_disc_gen = self._last_discovery_mono.get(pid, (-1e9, 0))
+            if last_disc_gen == cur_gen:
+                elapsed_disc = now - last_disc_mono
+                mouse_moved_since = (not is_non_mouse) and (last_active_mono > last_disc_mono) and (elapsed_disc >= 5.0)
+                if not mouse_moved_since and elapsed_disc < 30.0:
+                    continue
+
+            self._last_discovery_mono[pid] = (now, cur_gen)
+
+            for d in ifaces:
+                path = d.get("path")
+                percent, is_charging = self._probe_device(path)
+                if 1 <= percent <= 100:
+                    self._cached_paths[pid] = path
+                    self._states[pid] = WirelessMouseState(
+                        percent=percent,
+                        is_charging=is_charging,
+                        is_sleeping=False,
+                        sleep_timeout_sec=180.0,
+                        last_rf_poll_mono=now,
+                        last_wake_check_mono=now,
+                        last_refresh_gen=cur_gen,
+                        name=prod_name,
+                    )
+                    results.append(
+                        DeviceBattery(
+                            id=f"asus_{pid:04x}",
+                            name=prod_name,
+                            protocol="ASUS ROG 2.4G",
+                            battery_percent=percent,
+                            is_charging=is_charging,
+                            status_text="Connected",
+                        )
+                    )
+                    break
 
         return results

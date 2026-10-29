@@ -1,4 +1,5 @@
 from .models import DeviceBattery
+from .power_guard import trigger_manual_refresh
 from .ble_collector import BLECollector
 from .razer_hid import RazerHIDCollector
 from .atk_hid import ATKHIDCollector
@@ -12,6 +13,7 @@ from .asus_hid import ASUSHIDCollector
 
 __all__ = [
     "DeviceBattery",
+    "trigger_manual_refresh",
     "BLECollector",
     "RazerHIDCollector",
     "ATKHIDCollector",
